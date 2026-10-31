@@ -1,0 +1,8 @@
+{
+  "name": "Remix Moon Studio Cloud Windows",
+  "description": "A high-performance infrastructure platform for provisioning, managing, and remotely accessing fully functional Windows virtual machines via RDP.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

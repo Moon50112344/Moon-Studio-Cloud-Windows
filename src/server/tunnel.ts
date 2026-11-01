@@ -27,6 +27,8 @@ export class TunnelManager {
   private restartTimeout: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
 
+  private attemptPreferredPort = true;
+
   constructor(localPort = 3389) {
     this.localPort = localPort;
   }
@@ -79,7 +81,12 @@ export class TunnelManager {
       }
 
       this.status = 'STARTING';
-      this.child = spawn(borePath, ['local', `${this.localPort}`, '--to', 'bore.pub'], {
+      const args = ['local', `${this.localPort}`, '--to', 'bore.pub'];
+      if (this.attemptPreferredPort) {
+        args.push('--port', '41735');
+      }
+
+      this.child = spawn(borePath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -100,6 +107,12 @@ export class TunnelManager {
       });
 
       this.child.on('exit', (code, signal) => {
+        if (!this.publicPort && this.attemptPreferredPort) {
+          // If preferred port 41735 was unavailable, fallback to any free port
+          this.attemptPreferredPort = false;
+        } else {
+          this.attemptPreferredPort = true;
+        }
         this.status = 'DISCONNECTED';
         this.publicPort = null;
         this.publicHost = '';
@@ -107,7 +120,7 @@ export class TunnelManager {
         if (!this.isShuttingDown) {
           this.restartTimeout = setTimeout(() => {
             this.start();
-          }, 3000);
+          }, 2000);
         }
       });
     } catch (err: unknown) {

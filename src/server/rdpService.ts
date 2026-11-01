@@ -17,6 +17,20 @@ export class RdpServiceManager {
 
     serverLogger.info('RDPService', `Configuring Remote Desktop Services for user ${username}...`);
 
+    // 0. Ensure xrdp and desktop packages are installed
+    if (!fs.existsSync('/usr/sbin/xrdp') || !fs.existsSync('/usr/bin/startxfce4')) {
+      serverLogger.info('RDPService', 'xrdp or desktop packages missing. Auto-installing in background...');
+      try {
+        execSync(
+          'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends xrdp xorgxrdp xfce4-session xfce4-panel xfdesktop4 dbus-x11',
+          { stdio: 'pipe' }
+        );
+        serverLogger.info('RDPService', 'xrdp and XFCE4 packages installed successfully.');
+      } catch (installErr) {
+        serverLogger.warn('RDPService', `Auto-install notice: ${installErr}`);
+      }
+    }
+
     // 1. Ensure user exists on OS
     try {
       execSync(`id "${username}"`, { stdio: 'ignore' });
@@ -48,7 +62,30 @@ export class RdpServiceManager {
       serverLogger.error('RDPService', `Failed to synchronize password: ${msg}`);
     }
 
-    // 3. Ensure xrdp configuration is tuned for standard RDP clients
+    // 3. Configure user X session to launch XFCE4 desktop (avoids cyan blank screen)
+    try {
+      const userHome = `/home/${username}`;
+      if (!fs.existsSync(userHome)) {
+        fs.mkdirSync(userHome, { recursive: true });
+      }
+      fs.writeFileSync(`${userHome}/.xsession`, 'startxfce4\n', 'utf8');
+      try {
+        execSync(`chown -R "${username}:${username}" "${userHome}"`, { stdio: 'ignore' });
+      } catch {
+        // ignore
+      }
+      if (fs.existsSync('/etc/xrdp/startwm.sh')) {
+        let startwm = fs.readFileSync('/etc/xrdp/startwm.sh', 'utf8');
+        if (!startwm.includes('startxfce4')) {
+          startwm = startwm.replace(/^test -x \/etc\/X11\/Xsession && exec \/etc\/X11\/Xsession/m, 'startxfce4\n# &');
+          fs.writeFileSync('/etc/xrdp/startwm.sh', startwm, 'utf8');
+        }
+      }
+    } catch (sessionErr) {
+      serverLogger.warn('RDPService', `Session script configuration notice: ${sessionErr}`);
+    }
+
+    // 4. Ensure xrdp configuration is tuned for standard RDP clients
     try {
       const xrdpIniPath = '/etc/xrdp/xrdp.ini';
       if (fs.existsSync(xrdpIniPath)) {
@@ -61,7 +98,7 @@ export class RdpServiceManager {
       // ignore
     }
 
-    // 4. Start xrdp-sesman if not running
+    // 5. Start xrdp-sesman if not running
     try {
       execSync('pgrep -x xrdp-sesman', { stdio: 'ignore' });
     } catch {
@@ -73,7 +110,7 @@ export class RdpServiceManager {
       }
     }
 
-    // 5. Start xrdp if not running
+    // 6. Start xrdp if not running
     try {
       execSync('pgrep -x xrdp', { stdio: 'ignore' });
       this.isRunning = true;
@@ -87,14 +124,7 @@ export class RdpServiceManager {
         this.isRunning = true;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (msg.includes('netlink socket') || msg.includes('Protocol not supported')) {
-          serverLogger.warn(
-            'RDPService',
-            'Cloud Run gVisor sandbox detected (AF_NETLINK restricted). Direct inbound TCP 3389 is protected by Google Cloud network firewall.'
-          );
-        } else {
-          serverLogger.warn('RDPService', `xrdp service note: ${msg}`);
-        }
+        serverLogger.warn('RDPService', `xrdp service note: ${msg}`);
       }
     }
 

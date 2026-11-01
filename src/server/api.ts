@@ -1,5 +1,7 @@
+import fs from 'node:fs';
 import { Router, Request, Response } from 'express';
 import { vmManager } from './vmManager';
+import { hypervisor } from './hypervisor';
 import { serverLogger, LogLevel, LogEntry } from './logger';
 import { probeHostInfrastructure } from './infrastructure';
 import { rdpSessionMonitor } from './rdpSessionMonitor';
@@ -302,4 +304,38 @@ apiRouter.post('/vms/:id/delete', async (req: Request, res: Response) => {
 apiRouter.post('/vms/:id/rebuild', async (req: Request, res: Response) => {
   const vm = await vmManager.rebuildVm(req.params.id);
   return res.json({ success: !!vm, vm });
+});
+
+/**
+ * Real VM Framebuffer Screenshot Endpoint (QMP Screendump)
+ */
+apiRouter.get('/vms/:id/screenshot', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const path = await hypervisor.takeScreenshot(id);
+  if (!path || !fs.existsSync(path)) {
+    return res.status(404).json({ success: false, error: 'Framebuffer not available or VM not running' });
+  }
+  return res.sendFile(path);
+});
+
+/**
+ * Real QMP VM Status Endpoint
+ */
+apiRouter.get('/vms/:id/qmp-status', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const status = await hypervisor.queryStatus(id);
+  return res.json({ success: !!status, status });
+});
+
+/**
+ * Keystroke / Input Event Injection via QMP
+ */
+apiRouter.post('/vms/:id/input', async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { key } = req.body;
+  if (!key) {
+    return res.status(400).json({ success: false, error: 'Missing key parameter' });
+  }
+  const ok = await hypervisor.sendInputKey(id, String(key));
+  return res.json({ success: ok });
 });

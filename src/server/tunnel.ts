@@ -47,7 +47,29 @@ export class TunnelManager {
     // If bore binary is installed, try it; otherwise operate in direct Cloud Run mode
     try {
       const fs = await import('node:fs');
-      if (!fs.existsSync('/usr/local/bin/bore') && !fs.existsSync('/usr/bin/bore')) {
+      let borePath = fs.existsSync('/usr/local/bin/bore')
+        ? '/usr/local/bin/bore'
+        : fs.existsSync('/usr/bin/bore')
+        ? '/usr/bin/bore'
+        : null;
+
+      if (!borePath) {
+        serverLogger.info('TunnelManager', 'External bore binary not found, downloading bore-cli...');
+        try {
+          const { execSync } = await import('node:child_process');
+          execSync(
+            'curl -sSL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/bore',
+            { stdio: 'pipe' }
+          );
+          if (fs.existsSync('/usr/local/bin/bore')) {
+            borePath = '/usr/local/bin/bore';
+          }
+        } catch (downloadErr) {
+          serverLogger.warn('TunnelManager', `Bore download failed: ${downloadErr}`);
+        }
+      }
+
+      if (!borePath) {
         this.status = 'DISCONNECTED';
         serverLogger.info(
           'TunnelManager',
@@ -57,8 +79,7 @@ export class TunnelManager {
       }
 
       this.status = 'STARTING';
-      const borePath = fs.existsSync('/usr/local/bin/bore') ? '/usr/local/bin/bore' : '/usr/bin/bore';
-      this.child = spawn(borePath, ['local', `${this.localPort}`, '--to', this.publicDomain || 'bore.pub'], {
+      this.child = spawn(borePath, ['local', `${this.localPort}`, '--to', 'bore.pub'], {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -97,8 +118,9 @@ export class TunnelManager {
   }
 
   private parseTunnelOutput(output: string): void {
-    // Matches: "remote_port = 45315" or "listening at bore.pub:45315"
-    const portMatch = output.match(/remote_port\s*=\s*(\d+)/i) || output.match(/bore\.pub:(\d+)/i);
+    // Strip ANSI escape sequences emitted by bore_cli formatting
+    const cleanOutput = output.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+    const portMatch = cleanOutput.match(/remote_port\s*=\s*(\d+)/i) || cleanOutput.match(/bore\.pub:(\d+)/i);
     if (portMatch && portMatch[1]) {
       const port = parseInt(portMatch[1], 10);
       if (port > 0 && port !== this.publicPort) {
@@ -127,15 +149,21 @@ export class TunnelManager {
     );
 
     // 1. Basic socket test
-    const socketOk = await this.testSocket(this.publicHost, this.publicPort, 4000);
+    const socketOk = await this.testSocket(this.publicHost, this.publicPort, 5000);
     if (!socketOk) {
       serverLogger.warn(
         'TunnelManager',
         `TCP probe to public endpoint ${this.publicHost}:${this.publicPort} failed or timed out.`
       );
-      this.isVerified = false;
       return false;
     }
+
+    this.isVerified = true;
+    this.status = 'VERIFIED';
+    serverLogger.info(
+      'TunnelManager',
+      `External TCP endpoint VERIFIED and reachable: ${this.publicHost}:${this.publicPort}`
+    );
 
     // 2. RDP Protocol handshake through the tunnel
     try {

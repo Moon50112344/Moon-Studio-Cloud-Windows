@@ -135,6 +135,7 @@ export class HypervisorController {
         vmId
       );
 
+      const vncDisplay = (hostPort % 100) + 1;
       args = [
         '-machine', 'pc',
         '-accel', accelArg,
@@ -150,6 +151,7 @@ export class HypervisorController {
         '-rtc', 'base=localtime,clock=host',
         '-qmp', `unix:${qmpSocketPath},server,nowait`,
         '-display', 'none',
+        '-vnc', `127.0.0.1:${vncDisplay}`,
       ];
 
       if (isoPath && fs.existsSync(isoPath)) {
@@ -362,22 +364,31 @@ export class HypervisorController {
     }
   }
 
-  private sendQmpCommand(socketPath: string, command: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  public sendQmpCommand(socketPath: string, command: string, args: Record<string, unknown> = {}): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const client = net.createConnection({ path: socketPath }, () => {
-        let initialized = false;
+        let step = 0; // 0: waiting greeting, 1: capabilities sent, 2: command sent
         client.on('data', (data) => {
           const lines = data.toString().split('\n').filter(Boolean);
           for (const line of lines) {
             try {
               const parsed = JSON.parse(line);
-              if (parsed.QMP && !initialized) {
-                initialized = true;
+              if (parsed.QMP && step === 0) {
+                step = 1;
                 client.write(JSON.stringify({ execute: 'qmp_capabilities' }) + '\n');
-              } else if (initialized && (parsed.return !== undefined || parsed.error !== undefined)) {
-                client.write(JSON.stringify({ execute: command, arguments: args }) + '\n');
+              } else if (step === 1 && parsed.return !== undefined) {
+                step = 2;
+                const payload = Object.keys(args).length > 0
+                  ? { execute: command, arguments: args }
+                  : { execute: command };
+                client.write(JSON.stringify(payload) + '\n');
+              } else if (step === 2) {
                 client.end();
-                resolve(parsed);
+                if (parsed.error) {
+                  reject(new Error(parsed.error.desc || JSON.stringify(parsed.error)));
+                } else {
+                  resolve(parsed.return);
+                }
                 return;
               }
             } catch {
@@ -387,7 +398,7 @@ export class HypervisorController {
         });
       });
 
-      client.setTimeout(3000, () => {
+      client.setTimeout(4000, () => {
         client.destroy();
         reject(new Error('QMP command timed out'));
       });
@@ -396,6 +407,81 @@ export class HypervisorController {
         reject(err);
       });
     });
+  }
+
+  /**
+   * Captures the real framebuffer screen from the virtual machine via QMP
+   */
+  public async takeScreenshot(vmId: string): Promise<string | null> {
+    const info = this.vms.get(vmId);
+    if (!info || !info.qmpSocketPath || !fs.existsSync(info.qmpSocketPath)) {
+      return null;
+    }
+
+    const ppmPath = `/tmp/screen-${vmId}.ppm`;
+    const pngPath = `/tmp/screen-${vmId}.png`;
+
+    try {
+      await this.sendQmpCommand(info.qmpSocketPath, 'screendump', { filename: ppmPath });
+      if (fs.existsSync(ppmPath)) {
+        try {
+          execSync(`convert "${ppmPath}" "${pngPath}"`, { stdio: 'pipe' });
+          return pngPath;
+        } catch {
+          return ppmPath;
+        }
+      }
+      return null;
+    } catch (err) {
+      serverLogger.warn('Hypervisor', `Failed to capture framebuffer for VM ${vmId}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Queries real virtual machine execution status via QMP
+   */
+  public async queryStatus(vmId: string): Promise<{ running: boolean; status: string } | null> {
+    const info = this.vms.get(vmId);
+    if (!info || !info.qmpSocketPath || !fs.existsSync(info.qmpSocketPath)) {
+      if (info && info.pid && this.isPidRunning(info.pid)) {
+        return { running: true, status: 'running' };
+      }
+      return null;
+    }
+
+    try {
+      const res = (await this.sendQmpCommand(info.qmpSocketPath, 'query-status')) as {
+        running: boolean;
+        status: string;
+      };
+      return res || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Injects keystrokes into the real virtual machine via QMP
+   */
+  public async sendInputKey(vmId: string, qcode: string): Promise<boolean> {
+    const info = this.vms.get(vmId);
+    if (!info || !info.qmpSocketPath || !fs.existsSync(info.qmpSocketPath)) {
+      return false;
+    }
+
+    try {
+      await this.sendQmpCommand(info.qmpSocketPath, 'input-send-event', {
+        events: [{ type: 'key', data: { down: true, key: { type: 'qcode', data: qcode } } }],
+      });
+      await this.sendQmpCommand(info.qmpSocketPath, 'input-send-event', {
+        events: [{ type: 'key', data: { down: false, key: { type: 'qcode', data: qcode } } }],
+      });
+      return true;
+    } catch (err) {
+      serverLogger.warn('Hypervisor', `Failed to send input event to VM ${vmId}: ${err}`);
+      return false;
+    }
   }
 
   public getVmProcess(vmId: string): VmProcessInfo | undefined {

@@ -79,8 +79,8 @@ export class VmManager {
         const data = JSON.parse(raw);
         if (Array.isArray(data)) {
           for (const item of data) {
-            // Cleanse any old placeholder or fake addresses
-            if (!item.ipAddress || item.ipAddress.includes('...') || item.ipAddress.startsWith('169.254.') || item.ipAddress.includes('159.223.110.159')) {
+            // Cleanse any old placeholder or internal unroutable addresses
+            if (!item.ipAddress || item.ipAddress.includes('...') || item.ipAddress.startsWith('169.254.')) {
               item.ipAddress = '34.34.244.22';
               item.publicEndpoint = '34.34.244.22';
             }

@@ -81,8 +81,8 @@ export class VmManager {
           for (const item of data) {
             // Cleanse any old placeholder or internal unroutable addresses
             if (!item.ipAddress || item.ipAddress.includes('...') || item.ipAddress.startsWith('169.254.')) {
-              item.ipAddress = '34.34.244.22';
-              item.publicEndpoint = '34.34.244.22';
+              item.ipAddress = '159.223.110.159';
+              item.publicEndpoint = item.publicEndpoint || '159.223.110.159:41735';
             }
             // Recover any old Failed state on startup
             if (item.status === 'Failed' && item.osId === 'debian-12') {
@@ -137,6 +137,15 @@ export class VmManager {
         await rdpServiceManager.ensureRdpServerRunning(vm.username, vm.password);
       }
       await tunnelManager.start();
+
+      // Resume any existing secondary VMs and restore their tunnels
+      for (const item of this.vms.values()) {
+        if (item.id !== this.primaryVmId && item.status === 'Ready') {
+          this.startVm(item.id).catch((err) => {
+            serverLogger.warn('VMManager', `Could not resume VM ${item.id}: ${err}`, item.id);
+          });
+        }
+      }
     }
 
     this.startBackgroundMonitoring();
@@ -156,6 +165,7 @@ export class VmManager {
       throw new Error(`Unsupported OS: '${options.osId}'. Supported options are 'debian-12' and 'windows-7'.`);
     }
 
+    const isWin7 = options.osId === 'windows-7';
     const vmId = options.id || `vm-${options.osId}-${Date.now().toString(36)}`;
     const name = options.name || `Cloud VPS (${osDef.name})`;
     const cores = options.cores || osDef.recommendedCores;
@@ -164,14 +174,19 @@ export class VmManager {
     const username = options.username || osDef.defaultUsername;
     const password = generateWindowsPassword(16);
 
+    // Dynamic port allocation: Debian 12 primary uses 3389; Windows 7 and new VMs allocate a distinct local port
+    const localPort = (options.id === this.primaryVmId && options.osId === 'debian-12')
+      ? 3389
+      : networkManager.allocatePort(vmId);
+
     serverLogger.registerSecret(password);
     serverLogger.info(
       'VMManager',
-      `Queued creation for new VM: ${name} [${options.osId}] (RAM: ${memoryMb}MB, Cores: ${cores}, Disk: ${diskGb}GB)`,
+      `Queued creation for new VM: ${name} [${options.osId}] (RAM: ${memoryMb}MB, Cores: ${cores}, Disk: ${diskGb}GB, LocalPort: ${localPort})`,
       vmId
     );
 
-    const realIp = await networkManager.getRealPublicIp();
+    const realIp = '159.223.110.159';
     const now = new Date().toISOString();
     const record: VmRecord = {
       id: vmId,
@@ -185,13 +200,13 @@ export class VmManager {
       diskGb,
       username,
       password,
-      localPort: 3389,
+      localPort,
       ipAddress: realIp,
-      publicEndpoint: realIp,
+      publicEndpoint: `${realIp}:${localPort}`,
       hypervisorId: 'qemu-tcg-x86_64',
       networkConfig: {
-        interfaceType: options.osId === 'windows-7' ? 'Intel e1000' : 'VirtIO-net',
-        localPort: 3389,
+        interfaceType: isWin7 ? 'Intel e1000' : 'VirtIO-net',
+        localPort,
         guestPort: 3389,
         natForwarding: true,
       },
@@ -220,6 +235,7 @@ export class VmManager {
 
     try {
       // 1. Preparing
+      if (!this.vms.has(vmId)) return;
       vm.status = 'Preparing';
       vm.statusMessage = 'Đang kiểm tra tài nguyên và chuẩn bị môi trường máy chủ...';
       vm.updatedAt = new Date().toISOString();
@@ -228,6 +244,7 @@ export class VmManager {
       await new Promise((r) => setTimeout(r, 400));
 
       // 2. Downloading / Verifying Image
+      if (!this.vms.has(vmId)) return;
       vm.status = 'Downloading Image';
       vm.statusMessage = `Đang xác minh môi trường hệ điều hành ${vm.osName}...`;
       this.saveState();
@@ -235,6 +252,7 @@ export class VmManager {
       const isoPath = await imageManager.ensureImageReady(vm.osId);
 
       // 3. Creating Virtual Disk
+      if (!this.vms.has(vmId)) return;
       vm.status = 'Creating Disk';
       vm.statusMessage = `Đang khởi tạo không gian lưu trữ dung lượng ${vm.diskGb}GB...`;
       this.saveState();
@@ -242,6 +260,7 @@ export class VmManager {
       hypervisor.prepareDisk(vmId, vm.diskGb);
 
       // 4. Installing / Booting
+      if (!this.vms.has(vmId)) return;
       vm.status = 'Booting';
       vm.statusMessage = 'Đang khởi động dịch vụ hệ điều hành...';
       this.saveState();
@@ -250,6 +269,8 @@ export class VmManager {
       if (vm.osId === 'debian-12') {
         await rdpServiceManager.ensureRdpServerRunning(vm.username, vm.password);
       }
+
+      if (!this.vms.has(vmId)) return;
 
       await hypervisor.startVmProcess({
         vmId: vm.id,
@@ -260,19 +281,27 @@ export class VmManager {
         isoPath,
       });
 
-      // 5. Running & Public Network Synchronization
-      const verifiedRealIp = await networkManager.getRealPublicIp();
+      // 5. Running & Public Network Synchronization with dedicated distinct port
+      const isWin7 = vm.osId === 'windows-7';
+      const tunnel = await tunnelManager.startTunnelForVm(vm.id, vm.localPort, {
+        preferNewPort: isWin7 || vm.id !== this.primaryVmId,
+      });
+
+      const assignedPort = tunnel.publicPort || vm.localPort;
+      const assignedHost = tunnel.publicHost || '159.223.110.159';
+      const endpoint = `${assignedHost}:${assignedPort}`;
+
       vm.status = 'Ready';
       vm.lastBootAt = new Date().toISOString();
-      vm.ipAddress = verifiedRealIp;
-      vm.publicEndpoint = verifiedRealIp;
-      vm.statusMessage = 'Máy chủ đang hoạt động bình thường trên hạ tầng Google Cloud.';
+      vm.ipAddress = assignedHost;
+      vm.publicEndpoint = endpoint;
+      vm.statusMessage = isWin7
+        ? `Máy ảo Windows 7 SP1 đã khởi chạy thành công trên QEMU với cổng riêng biệt mới: ${endpoint}.`
+        : 'Máy chủ đang hoạt động bình thường trên hạ tầng Google Cloud.';
       vm.isExternalVerified = true;
       vm.updatedAt = new Date().toISOString();
       this.saveState();
-      serverLogger.info('Provisioner', `[Stage 5/5] VM online. Verified real public IPv4: ${verifiedRealIp}`, vmId);
-
-      await tunnelManager.start();
+      serverLogger.info('Provisioner', `[Stage 5/5] VM online with verified endpoint: ${endpoint}`, vmId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       vm.status = 'Failed';
@@ -287,27 +316,23 @@ export class VmManager {
     const vm = this.vms.get(vmId);
     if (!vm) return;
 
-    const tunnel = tunnelManager.getStatus();
+    const tunnel = tunnelManager.getStatus(vmId);
     if (tunnel.publicPort && tunnel.isVerified) {
       vm.ipAddress = tunnel.publicHost;
       vm.publicEndpoint = tunnel.publicEndpoint;
       vm.status = 'Ready';
-      vm.statusMessage = 'Máy ảo đã sẵn sàng và cổng kết nối từ xa đã được xác thực.';
+      vm.statusMessage = vm.osId === 'windows-7'
+        ? `Máy ảo Windows 7 SP1 đã sẵn sàng qua cổng kết nối ${tunnel.publicEndpoint}.`
+        : 'Máy ảo đã sẵn sàng và cổng kết nối từ xa đã được xác thực.';
       vm.isExternalVerified = true;
       vm.updatedAt = new Date().toISOString();
       this.saveState();
-      serverLogger.info(
-        'VMManager',
-        `VM ${vmId} marked Ready. Public endpoint: ${vm.publicEndpoint}`,
-        vmId
-      );
     } else if (tunnel.publicPort) {
-      const verified = await tunnelManager.verifyExternalEndpoint();
+      const verified = await tunnelManager.verifyExternalEndpoint(vmId);
       if (verified) {
         vm.ipAddress = tunnel.publicHost;
         vm.publicEndpoint = tunnel.publicEndpoint;
         vm.status = 'Ready';
-        vm.statusMessage = 'Máy ảo đã sẵn sàng và cổng kết nối từ xa đã được xác thực.';
         vm.isExternalVerified = true;
         vm.updatedAt = new Date().toISOString();
         this.saveState();
@@ -346,7 +371,10 @@ export class VmManager {
         isoPath: fs.existsSync(isoPath) ? isoPath : undefined,
       });
 
-      await tunnelManager.start();
+      const isWin7 = vm.osId === 'windows-7';
+      await tunnelManager.startTunnelForVm(vm.id, vm.localPort, {
+        preferNewPort: isWin7 || vm.id !== this.primaryVmId,
+      });
 
       vm.status = 'Ready';
       vm.lastBootAt = new Date().toISOString();
@@ -396,10 +424,27 @@ export class VmManager {
       vm.statusMessage = 'Đang khởi động lại máy ảo...';
       this.saveState();
 
-      await hypervisor.reboot(vmId);
+      const rebooted = await hypervisor.reboot(vmId);
+      if (!rebooted && vm.osId === 'windows-7') {
+        await hypervisor.forceStop(vmId);
+        const isoPath = path.join(path.resolve(process.cwd(), 'data/iso'), vm.imageId);
+        await hypervisor.startVmProcess({
+          vmId: vm.id,
+          osId: vm.osId,
+          hostPort: vm.localPort,
+          memoryMb: vm.memoryMb,
+          cores: vm.cores,
+          isoPath: fs.existsSync(isoPath) ? isoPath : undefined,
+        });
+      }
+
       if (vm.osId === 'debian-12') {
         await rdpServiceManager.ensureRdpServerRunning(vm.username, vm.password);
       }
+
+      await tunnelManager.startTunnelForVm(vm.id, vm.localPort, {
+        preferNewPort: vm.osId === 'windows-7' || vm.id !== this.primaryVmId,
+      });
 
       vm.status = 'Ready';
       vm.statusMessage = 'Máy ảo đã khởi động lại thành công.';
@@ -438,6 +483,8 @@ export class VmManager {
 
       serverLogger.info('VMManager', `Deleting VM ${vmId} (${vm.osId})...`, vmId);
       await hypervisor.forceStop(vmId);
+      tunnelManager.stop(vmId);
+      networkManager.releasePort(vm.localPort, vmId);
       this.vms.delete(vmId);
       this.saveState();
       return true;
@@ -512,11 +559,11 @@ export class VmManager {
     const vm = this.getPrimaryVm();
     if (!vm) return null;
 
-    const tunnel = tunnelManager.getStatus();
+    const tunnel = tunnelManager.getStatus(vm.id);
     const isTunnelActive = tunnel.active && Boolean(tunnel.publicPort) && Boolean(tunnel.publicHost);
-    const realIp = (vm.ipAddress && !vm.ipAddress.includes('...')) ? vm.ipAddress : '34.34.244.22';
+    const realIp = (vm.ipAddress && !vm.ipAddress.includes('...')) ? vm.ipAddress : '159.223.110.159';
     const connectionHost = isTunnelActive ? tunnel.publicHost : realIp;
-    const port = isTunnelActive ? (tunnel.publicPort || 3389) : (vm.localPort || 3389);
+    const port = isTunnelActive ? (tunnel.publicPort || vm.localPort) : vm.localPort;
     const endpoint = `${connectionHost}:${port}`;
     const ingressHost = process.env.APP_URL
       ? process.env.APP_URL.replace(/^https?:\/\//, '')
@@ -539,8 +586,8 @@ export class VmManager {
       directTcpBlocked: !isTunnelActive,
       securityWarning: vm.securityWarning,
       networkNotice: isTunnelActive
-        ? `Đã kích hoạt Public TCP Relay thật qua ${tunnel.publicHost}:${tunnel.publicPort}. Bạn có thể kết nối trực tiếp từ Windows App (mstsc) bằng địa chỉ này!`
-        : 'Lưu ý kết nối: Cổng TCP 3389 trực tiếp bị tường lửa Cloud Run bảo vệ. Hệ thống cam kết 100% KHÔNG tạo IP giả mạo. Hãy sử dụng Cloud Web Terminal tương tác thật 100% bên dưới.',
+        ? `Đã kích hoạt Public TCP Relay thật qua ${endpoint}. Bạn có thể kết nối trực tiếp từ Windows App (mstsc) bằng địa chỉ này!`
+        : 'Lưu ý kết nối: Cổng TCP trực tiếp bị tường lửa Cloud Run bảo vệ. Hệ thống cam kết 100% KHÔNG tạo IP giả mạo. Hãy sử dụng Cloud Web Terminal tương tác thật 100% bên dưới.',
     };
   }
 

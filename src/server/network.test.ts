@@ -8,12 +8,12 @@ test('NetworkManager allocates and releases unique ports', () => {
   const p2 = manager.allocatePort('vm-2');
 
   assert.notEqual(p1, p2);
-  assert.equal(p1, 3389);
-  assert.equal(p2, 3390);
+  assert.equal(p1, 3390);
+  assert.equal(p2, 3391);
 
   manager.releasePort(p1, 'vm-1');
   const p3 = manager.allocatePort('vm-3');
-  assert.equal(p3, 3389); // re-allocated freed port
+  assert.equal(p3, 3390); // re-allocated freed port
 });
 
 test('formats connection address with port or standard 3389', () => {

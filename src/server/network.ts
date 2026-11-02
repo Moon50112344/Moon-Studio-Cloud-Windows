@@ -12,8 +12,8 @@ export interface VmNetworkConfig {
 }
 
 export class NetworkManager {
-  private allocatedPorts: Set<number> = new Set();
-  private basePort = 3389;
+  private allocatedPorts: Set<number> = new Set([3389]);
+  private basePort = 3390;
   private cachedRealPublicIp: string | null = null;
   private lastIpFetchTime = 0;
 

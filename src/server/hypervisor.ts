@@ -195,12 +195,29 @@ export class HypervisorController {
       }
     }
 
-    let hasQemuBin = false;
-    try {
-      execSync('which qemu-system-x86_64', { stdio: 'ignore' });
-      hasQemuBin = true;
-    } catch {
-      hasQemuBin = false;
+    let hasQemuBin = fs.existsSync('/usr/bin/qemu-system-x86_64');
+    if (!hasQemuBin) {
+      try {
+        execSync('which qemu-system-x86_64', { stdio: 'ignore' });
+        hasQemuBin = true;
+      } catch {
+        hasQemuBin = false;
+      }
+    }
+
+    if (!hasQemuBin) {
+      if (osId === 'windows-7') {
+        serverLogger.info('Hypervisor', `QEMU binary not found in sandbox, attempting quick auto-install...`, vmId);
+        try {
+          execSync(
+            'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends qemu-system-x86 qemu-utils seabios',
+            { stdio: 'pipe' }
+          );
+          hasQemuBin = fs.existsSync('/usr/bin/qemu-system-x86_64');
+        } catch (installErr) {
+          serverLogger.warn('Hypervisor', `QEMU auto-install attempt failed: ${installErr}`, vmId);
+        }
+      }
     }
 
     if (!hasQemuBin) {
@@ -233,6 +250,13 @@ export class HypervisorController {
       };
       this.vms.set(vmId, nativeInfo);
       return nativeInfo;
+    }
+
+    // Clean up any stale hypervisor process that may still hold hostPort
+    try {
+      execSync(`pkill -9 -f "hostfwd=tcp::${hostPort}-" || true`, { stdio: 'ignore' });
+    } catch {
+      // ignore
     }
 
     serverLogger.info(

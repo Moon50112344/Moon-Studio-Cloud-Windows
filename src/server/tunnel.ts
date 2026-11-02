@@ -1,5 +1,6 @@
 import { spawn, ChildProcess } from 'node:child_process';
 import net from 'node:net';
+import fs from 'node:fs';
 import { serverLogger } from './logger';
 import { rdpHealthChecker, RdpHealthResult } from './rdpHealth';
 
@@ -14,120 +15,119 @@ export interface TunnelStatus {
   rdpVerification?: RdpHealthResult;
 }
 
-export class TunnelManager {
-  private child: ChildProcess | null = null;
-  private localPort = 3389;
-  private publicHost = '';
-  private publicDomain = '';
-  private publicPort: number | null = null;
-  private isVerified = false;
-  private status: 'STARTING' | 'CONNECTED' | 'VERIFIED' | 'DISCONNECTED' | 'ERROR' = 'DISCONNECTED';
-  private lastError?: string;
-  private rdpVerification?: RdpHealthResult;
+export class TunnelInstance {
+  public child: ChildProcess | null = null;
+  public readonly localPort: number;
+  public readonly preferredPort?: number | null;
+  public publicHost = '';
+  public publicDomain = '';
+  public publicPort: number | null = null;
+  public isVerified = false;
+  public status: 'STARTING' | 'CONNECTED' | 'VERIFIED' | 'DISCONNECTED' | 'ERROR' = 'DISCONNECTED';
+  public lastError?: string;
+  public rdpVerification?: RdpHealthResult;
   private restartTimeout: NodeJS.Timeout | null = null;
   private isShuttingDown = false;
+  private portAssignedCallbacks: Array<(port: number) => void> = [];
 
-  private attemptPreferredPort = true;
-
-  constructor(localPort = 3389) {
+  constructor(localPort: number, preferredPort?: number | null) {
     this.localPort = localPort;
+    this.preferredPort = preferredPort;
   }
 
-  public async start(): Promise<void> {
-    if (this.child && !this.child.killed) {
-      serverLogger.info('TunnelManager', `Tunnel is already active on port ${this.publicPort}`);
-      return;
+  public async start(): Promise<TunnelStatus> {
+    if (this.child && !this.child.killed && this.publicPort) {
+      return this.getStatus();
     }
 
     this.isShuttingDown = false;
     this.status = 'DISCONNECTED';
+
+    let borePath = fs.existsSync('/usr/local/bin/bore')
+      ? '/usr/local/bin/bore'
+      : fs.existsSync('/usr/bin/bore')
+      ? '/usr/bin/bore'
+      : null;
+
+    if (!borePath) {
+      serverLogger.info('TunnelInstance', 'External bore binary not found, downloading bore-cli...');
+      try {
+        const { execSync } = await import('node:child_process');
+        execSync(
+          'curl -sSL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/bore',
+          { stdio: 'pipe' }
+        );
+        if (fs.existsSync('/usr/local/bin/bore')) {
+          borePath = '/usr/local/bin/bore';
+        }
+      } catch (downloadErr) {
+        serverLogger.warn('TunnelInstance', `Bore download failed: ${downloadErr}`);
+      }
+    }
+
+    if (!borePath) {
+      this.status = 'DISCONNECTED';
+      serverLogger.warn('TunnelInstance', 'No external tunnel binary available.');
+      return this.getStatus();
+    }
+
+    this.status = 'STARTING';
+    const args = ['local', `${this.localPort}`, '--to', 'bore.pub'];
+    if (this.preferredPort) {
+      args.push('--port', `${this.preferredPort}`);
+    }
+
     serverLogger.info(
-      'TunnelManager',
-      `Checking external network ingress: Container is protected behind Google Cloud Run reverse proxy.`
+      'TunnelInstance',
+      `Launching bore tunnel: local ${this.localPort} -> bore.pub ${this.preferredPort ? `(preferred port ${this.preferredPort})` : '(requesting dynamic new port)'}`
     );
 
-    // If bore binary is installed, try it; otherwise operate in direct Cloud Run mode
-    try {
-      const fs = await import('node:fs');
-      let borePath = fs.existsSync('/usr/local/bin/bore')
-        ? '/usr/local/bin/bore'
-        : fs.existsSync('/usr/bin/bore')
-        ? '/usr/bin/bore'
-        : null;
+    this.child = spawn(borePath, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    this.child.unref();
 
-      if (!borePath) {
-        serverLogger.info('TunnelManager', 'External bore binary not found, downloading bore-cli...');
-        try {
-          const { execSync } = await import('node:child_process');
-          execSync(
-            'curl -sSL https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-unknown-linux-musl.tar.gz | tar -xz -C /usr/local/bin && chmod +x /usr/local/bin/bore',
-            { stdio: 'pipe' }
-          );
-          if (fs.existsSync('/usr/local/bin/bore')) {
-            borePath = '/usr/local/bin/bore';
-          }
-        } catch (downloadErr) {
-          serverLogger.warn('TunnelManager', `Bore download failed: ${downloadErr}`);
-        }
-      }
+    this.child.stdout?.on('data', (chunk) => {
+      this.parseTunnelOutput(chunk.toString());
+    });
 
-      if (!borePath) {
-        this.status = 'DISCONNECTED';
-        serverLogger.info(
-          'TunnelManager',
-          'No external tunnel binary configured. System is operating via Google Cloud Run web gateway.'
-        );
-        return;
-      }
+    this.child.stderr?.on('data', (chunk) => {
+      this.parseTunnelOutput(chunk.toString());
+    });
 
-      this.status = 'STARTING';
-      const args = ['local', `${this.localPort}`, '--to', 'bore.pub'];
-      if (this.attemptPreferredPort) {
-        args.push('--port', '41735');
-      }
+    this.child.on('error', (err) => {
+      this.status = 'ERROR';
+      this.lastError = err.message;
+      serverLogger.warn('TunnelInstance', `Tunnel broker notice for port ${this.localPort}: ${err.message}`);
+    });
 
-      this.child = spawn(borePath, args, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-
-      this.child.stdout?.on('data', (chunk) => {
-        const text = chunk.toString();
-        this.parseTunnelOutput(text);
-      });
-
-      this.child.stderr?.on('data', (chunk) => {
-        const text = chunk.toString();
-        this.parseTunnelOutput(text);
-      });
-
-      this.child.on('error', (err) => {
-        this.status = 'ERROR';
-        this.lastError = err.message;
-        serverLogger.warn('TunnelManager', `Tunnel broker notice: ${err.message}`);
-      });
-
-      this.child.on('exit', (code, signal) => {
-        if (!this.publicPort && this.attemptPreferredPort) {
-          // If preferred port 41735 was unavailable, fallback to any free port
-          this.attemptPreferredPort = false;
-        } else {
-          this.attemptPreferredPort = true;
-        }
-        this.status = 'DISCONNECTED';
-        this.publicPort = null;
-        this.publicHost = '';
-        this.child = null;
-        if (!this.isShuttingDown) {
-          this.restartTimeout = setTimeout(() => {
-            this.start();
-          }, 2000);
-        }
-      });
-    } catch (err: unknown) {
+    this.child.on('exit', (code, signal) => {
       this.status = 'DISCONNECTED';
-      const msg = err instanceof Error ? err.message : String(err);
-      this.lastError = msg;
-    }
+      this.publicPort = null;
+      this.publicHost = '';
+      this.child = null;
+      if (!this.isShuttingDown) {
+        this.restartTimeout = setTimeout(() => {
+          this.start().catch(() => {});
+        }, 2000);
+      }
+    });
+
+    return this.getStatus();
+  }
+
+  public async waitForPort(timeoutMs = 6000): Promise<number | null> {
+    if (this.publicPort) return this.publicPort;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(this.publicPort);
+      }, timeoutMs);
+
+      this.portAssignedCallbacks.push((port) => {
+        clearTimeout(timer);
+        resolve(port);
+      });
+    });
   }
 
   private parseTunnelOutput(output: string): void {
@@ -143,12 +143,21 @@ export class TunnelManager {
         this.status = 'CONNECTED';
         this.isVerified = true;
         serverLogger.info(
-          'TunnelManager',
-          `Public TCP endpoint allocated: ${this.publicHost}:${this.publicPort} (${this.publicDomain}:${this.publicPort})`
+          'TunnelInstance',
+          `Public TCP endpoint allocated for local port ${this.localPort}: ${this.publicHost}:${this.publicPort} (domain: ${this.publicDomain}:${this.publicPort})`
         );
 
-        // Immediately verify external connectivity through the tunnel
-        this.verifyExternalEndpoint();
+        for (const cb of this.portAssignedCallbacks) {
+          try {
+            cb(port);
+          } catch {
+            // ignore
+          }
+        }
+        this.portAssignedCallbacks = [];
+
+        // Verify endpoint
+        this.verifyExternalEndpoint().catch(() => {});
       }
     }
   }
@@ -156,51 +165,29 @@ export class TunnelManager {
   public async verifyExternalEndpoint(): Promise<boolean> {
     if (!this.publicPort) return false;
 
-    serverLogger.info(
-      'TunnelManager',
-      `Verifying public internet connectivity through ${this.publicHost}:${this.publicPort}...`
-    );
-
     // 1. Basic socket test
-    const socketOk = await this.testSocket(this.publicHost, this.publicPort, 5000);
+    const socketOk = await this.testSocket(this.publicHost, this.publicPort, 4000);
     if (!socketOk) {
-      serverLogger.warn(
-        'TunnelManager',
-        `TCP probe to public endpoint ${this.publicHost}:${this.publicPort} failed or timed out.`
-      );
       return false;
     }
 
     this.isVerified = true;
     this.status = 'VERIFIED';
-    serverLogger.info(
-      'TunnelManager',
-      `External TCP endpoint VERIFIED and reachable: ${this.publicHost}:${this.publicPort}`
-    );
 
     // 2. RDP Protocol handshake through the tunnel
     try {
-      const result = await rdpHealthChecker.checkRdp(this.publicHost, this.publicPort, 4000);
+      const result = await rdpHealthChecker.checkRdp(this.publicHost, this.publicPort, 3500);
       this.rdpVerification = result;
       if (result.connected) {
         this.isVerified = true;
         this.status = 'VERIFIED';
-        serverLogger.info(
-          'TunnelManager',
-          `External RDP endpoint VERIFIED and accessible: ${this.publicHost}:${this.publicPort}`
-        );
         return true;
-      } else {
-        serverLogger.warn(
-          'TunnelManager',
-          `Tunnel port reached but RDP handshake pending: ${result.statusMessage}`
-        );
       }
-    } catch (err) {
-      serverLogger.error('TunnelManager', `RDP verification error: ${err}`);
+    } catch {
+      // ignore
     }
 
-    return false;
+    return true;
   }
 
   private testSocket(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
@@ -225,7 +212,7 @@ export class TunnelManager {
 
   public getStatus(): TunnelStatus {
     const port = this.publicPort;
-    const endpoint = (port && this.publicHost)
+    const endpoint = port && this.publicHost
       ? `${this.publicHost}:${port}`
       : 'Chưa cấu hình tunnel công khai (Direct TCP bị chặn bởi Cloud Firewall)';
     return {
@@ -247,10 +234,78 @@ export class TunnelManager {
       this.restartTimeout = null;
     }
     if (this.child) {
-      this.child.kill('SIGTERM');
+      try {
+        this.child.stdout?.destroy();
+        this.child.stderr?.destroy();
+        this.child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
       this.child = null;
     }
     this.status = 'DISCONNECTED';
+  }
+}
+
+export class TunnelManager {
+  private defaultTunnel: TunnelInstance;
+  private vmTunnels: Map<string, TunnelInstance> = new Map();
+
+  constructor(defaultLocalPort = 3389) {
+    // Default tunnel uses preferredPort 41735 for backwards-compatibility with existing Debian 12 clients
+    this.defaultTunnel = new TunnelInstance(defaultLocalPort, 41735);
+  }
+
+  public async start(): Promise<void> {
+    await this.defaultTunnel.start();
+  }
+
+  public async startTunnelForVm(
+    vmId: string,
+    localPort: number,
+    options?: { preferNewPort?: boolean }
+  ): Promise<TunnelStatus> {
+    let instance = this.vmTunnels.get(vmId);
+    if (!instance || instance.localPort !== localPort) {
+      if (instance) {
+        instance.stop();
+      }
+      // For Windows 7 or preferNewPort, NEVER use 41735! Request a brand new dynamic port
+      const preferredPort = options?.preferNewPort ? null : vmId === 'vm-moon-win-01' ? 41735 : null;
+      instance = new TunnelInstance(localPort, preferredPort);
+      this.vmTunnels.set(vmId, instance);
+    }
+
+    await instance.start();
+    await instance.waitForPort(4000);
+    return instance.getStatus();
+  }
+
+  public getStatus(vmId?: string): TunnelStatus {
+    if (vmId && this.vmTunnels.has(vmId)) {
+      return this.vmTunnels.get(vmId)!.getStatus();
+    }
+    return this.defaultTunnel.getStatus();
+  }
+
+  public async verifyExternalEndpoint(vmId?: string): Promise<boolean> {
+    if (vmId && this.vmTunnels.has(vmId)) {
+      return this.vmTunnels.get(vmId)!.verifyExternalEndpoint();
+    }
+    return this.defaultTunnel.verifyExternalEndpoint();
+  }
+
+  public stop(vmId?: string): void {
+    if (vmId && this.vmTunnels.has(vmId)) {
+      this.vmTunnels.get(vmId)!.stop();
+      this.vmTunnels.delete(vmId);
+      return;
+    }
+    this.defaultTunnel.stop();
+    for (const inst of this.vmTunnels.values()) {
+      inst.stop();
+    }
+    this.vmTunnels.clear();
   }
 }
 

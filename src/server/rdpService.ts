@@ -2,6 +2,7 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { serverLogger } from './logger';
 import { rdpHealthChecker, RdpHealthResult } from './rdpHealth';
+import { vncBridgeManager } from './vncBridge';
 
 export class RdpServiceManager {
   private isRunning = false;
@@ -18,17 +19,28 @@ export class RdpServiceManager {
     serverLogger.info('RDPService', `Configuring Remote Desktop Services for user ${username}...`);
 
     // 0. Ensure xrdp and desktop packages are installed
-    if (!fs.existsSync('/usr/sbin/xrdp') || !fs.existsSync('/usr/bin/startxfce4')) {
+    if (!fs.existsSync('/usr/sbin/xrdp') || !fs.existsSync('/usr/bin/startxfce4') || !fs.existsSync('/usr/bin/dbus-daemon')) {
       serverLogger.info('RDPService', 'xrdp or desktop packages missing. Auto-installing in background...');
       try {
         execSync(
-          'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends xrdp xorgxrdp xfce4-session xfce4-panel xfdesktop4 dbus-x11',
+          'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends xrdp xorgxrdp xfce4-session xfwm4 xfce4-panel xfdesktop4 thunar firefox-esr dbus dbus-x11 ssl-cert xfce4-terminal desktop-base genisoimage nasm',
           { stdio: 'pipe' }
         );
-        serverLogger.info('RDPService', 'xrdp and XFCE4 packages installed successfully.');
+        serverLogger.info('RDPService', 'xrdp, D-Bus and XFCE4 packages installed successfully.');
       } catch (installErr) {
         serverLogger.warn('RDPService', `Auto-install notice: ${installErr}`);
       }
+    }
+
+    // Ensure ssl certificate exists and xrdp has read permissions
+    try {
+      execSync('make-ssl-cert generate-default-snakeoil --force-overwrite || true', { stdio: 'ignore' });
+      execSync('adduser xrdp ssl-cert || true', { stdio: 'ignore' });
+      if (fs.existsSync('/etc/ssl/private/ssl-cert-snakeoil.key')) {
+        execSync('chmod 644 /etc/ssl/private/ssl-cert-snakeoil.key', { stdio: 'ignore' });
+      }
+    } catch {
+      // ignore
     }
 
     // 1. Ensure user exists on OS
@@ -62,37 +74,97 @@ export class RdpServiceManager {
       serverLogger.error('RDPService', `Failed to synchronize password: ${msg}`);
     }
 
-    // 3. Configure user X session to launch XFCE4 desktop (avoids cyan blank screen)
+    // 2.5 Ensure system D-Bus daemon is running (critical for desktop session not crashing)
+    try {
+      execSync('pgrep -x dbus-daemon', { stdio: 'ignore' });
+    } catch {
+      try {
+        if (!fs.existsSync('/run/dbus')) {
+          fs.mkdirSync('/run/dbus', { recursive: true });
+        }
+        execSync('dbus-daemon --system --fork', { stdio: 'ignore' });
+        serverLogger.info('RDPService', 'D-Bus system daemon started successfully.');
+      } catch (dbusErr) {
+        serverLogger.warn('RDPService', `D-Bus daemon start note: ${dbusErr}`);
+      }
+    }
+
+    // 3. Configure user X session to launch XFCE4 desktop with D-Bus (prevents cyan blank screen crash)
     try {
       const userHome = `/home/${username}`;
       if (!fs.existsSync(userHome)) {
         fs.mkdirSync(userHome, { recursive: true });
       }
-      fs.writeFileSync(`${userHome}/.xsession`, 'startxfce4\n', 'utf8');
+      const xsessionContent = [
+        '#!/bin/sh',
+        'unset DBUS_SESSION_BUS_ADDRESS',
+        'unset XDG_RUNTIME_DIR',
+        'export XDG_SESSION_TYPE=x11',
+        'export XDG_CURRENT_DESKTOP=XFCE',
+        'export DESKTOP_SESSION=xfce',
+        'exec dbus-launch --exit-with-session startxfce4',
+        '',
+      ].join('\n');
+      fs.writeFileSync(`${userHome}/.xsession`, xsessionContent, { encoding: 'utf8', mode: 0o755 });
       try {
         execSync(`chown -R "${username}:${username}" "${userHome}"`, { stdio: 'ignore' });
       } catch {
         // ignore
       }
-      if (fs.existsSync('/etc/xrdp/startwm.sh')) {
-        let startwm = fs.readFileSync('/etc/xrdp/startwm.sh', 'utf8');
-        if (!startwm.includes('startxfce4')) {
-          startwm = startwm.replace(/^test -x \/etc\/X11\/Xsession && exec \/etc\/X11\/Xsession/m, 'startxfce4\n# &');
-          fs.writeFileSync('/etc/xrdp/startwm.sh', startwm, 'utf8');
-        }
-      }
+
+      const startwmContent = [
+        '#!/bin/sh',
+        'if test -r /etc/profile; then . /etc/profile; fi',
+        'if test -r ~/.profile; then . ~/.profile; fi',
+        'unset DBUS_SESSION_BUS_ADDRESS',
+        'unset XDG_RUNTIME_DIR',
+        'export XDG_SESSION_TYPE=x11',
+        'export XDG_CURRENT_DESKTOP=XFCE',
+        'export DESKTOP_SESSION=xfce',
+        'if [ -r ~/.xsession ]; then exec ~/.xsession; fi',
+        'exec dbus-launch --exit-with-session startxfce4',
+        '',
+      ].join('\n');
+      fs.writeFileSync('/etc/xrdp/startwm.sh', startwmContent, { encoding: 'utf8', mode: 0o755 });
     } catch (sessionErr) {
       serverLogger.warn('RDPService', `Session script configuration notice: ${sessionErr}`);
     }
 
     // 4. Ensure xrdp configuration is tuned for standard RDP clients
     try {
+      try {
+        execSync('adduser xrdp ssl-cert || true', { stdio: 'ignore' });
+        if (fs.existsSync('/etc/ssl/private/ssl-cert-snakeoil.key')) {
+          execSync('chmod 644 /etc/ssl/private/ssl-cert-snakeoil.key', { stdio: 'ignore' });
+        }
+      } catch {
+        // ignore
+      }
+
       const xrdpIniPath = '/etc/xrdp/xrdp.ini';
       if (fs.existsSync(xrdpIniPath)) {
         let content = fs.readFileSync(xrdpIniPath, 'utf8');
         content = content.replace(/^port=.*/m, 'port=3389');
-        content = content.replace(/^crypt_level=.*/m, 'crypt_level=high');
+        if (!content.includes('[Windows7]')) {
+          const win7Section = [
+            '[Windows7]',
+            'name=Windows 7 QEMU Display',
+            'lib=libvnc.so',
+            'ip=127.0.0.1',
+            'port=5991',
+            'username=na',
+            'password=',
+            '',
+            '',
+          ].join('\n');
+          content = content.replace('[Xorg]', win7Section + '[Xorg]');
+        }
         fs.writeFileSync(xrdpIniPath, content, 'utf8');
+      }
+      try {
+        await vncBridgeManager.ensureBridge(5991);
+      } catch {
+        // ignore
       }
     } catch {
       // ignore
@@ -104,6 +176,13 @@ export class RdpServiceManager {
     } catch {
       serverLogger.info('RDPService', 'Starting xrdp session manager daemon...');
       try {
+        if (!fs.existsSync('/var/run/xrdp')) {
+          fs.mkdirSync('/var/run/xrdp', { recursive: true });
+        }
+        // Remove stale pid file if process wasn't actually running
+        if (fs.existsSync('/var/run/xrdp/xrdp-sesman.pid')) {
+          fs.unlinkSync('/var/run/xrdp/xrdp-sesman.pid');
+        }
         execSync('/usr/sbin/xrdp-sesman', { stdio: 'ignore' });
       } catch (err) {
         serverLogger.warn('RDPService', `xrdp-sesman start: ${err}`);
@@ -119,6 +198,9 @@ export class RdpServiceManager {
       try {
         if (!fs.existsSync('/var/run/xrdp')) {
           fs.mkdirSync('/var/run/xrdp', { recursive: true });
+        }
+        if (fs.existsSync('/var/run/xrdp/xrdp.pid')) {
+          fs.unlinkSync('/var/run/xrdp/xrdp.pid');
         }
         execSync('/usr/sbin/xrdp', { stdio: 'pipe' });
         this.isRunning = true;

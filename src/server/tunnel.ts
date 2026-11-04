@@ -107,12 +107,36 @@ export class TunnelInstance {
       this.publicHost = '';
       this.child = null;
       if (!this.isShuttingDown) {
+        if (this.preferredPort) {
+          serverLogger.warn('TunnelInstance', `Preferred port ${this.preferredPort} unavailable or exited. Falling back to dynamic port.`);
+          (this as { preferredPort?: number | null }).preferredPort = null;
+        }
         this.restartTimeout = setTimeout(() => {
           this.start().catch(() => {});
-        }, 2000);
+        }, 1500);
       }
     });
 
+    return this.getStatus();
+  }
+
+  public async reload(): Promise<TunnelStatus> {
+    serverLogger.info('TunnelInstance', `Forcibly reloading tunnel for local port ${this.localPort}...`);
+    this.stop();
+    try {
+      const { execSync } = await import('node:child_process');
+      execSync(`pkill -9 -f "bore local ${this.localPort}" || true`, { stdio: 'ignore' });
+    } catch {
+      // ignore
+    }
+    (this as { preferredPort?: number | null }).preferredPort = null;
+    this.publicPort = null;
+    this.publicHost = '';
+    this.isVerified = false;
+    this.status = 'DISCONNECTED';
+    await new Promise((r) => setTimeout(r, 600));
+    await this.start();
+    await this.waitForPort(6000);
     return this.getStatus();
   }
 
@@ -133,6 +157,12 @@ export class TunnelInstance {
   private parseTunnelOutput(output: string): void {
     // Strip ANSI escape sequences emitted by bore_cli formatting
     const cleanOutput = output.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '');
+
+    if (/already in use/i.test(cleanOutput)) {
+      serverLogger.warn('TunnelInstance', `Port ${this.preferredPort || 'requested'} already in use. Switching to dynamic port.`);
+      (this as { preferredPort?: number | null }).preferredPort = null;
+    }
+
     const portMatch = cleanOutput.match(/remote_port\s*=\s*(\d+)/i) || cleanOutput.match(/bore\.pub:(\d+)/i);
     if (portMatch && portMatch[1]) {
       const port = parseInt(portMatch[1], 10);
@@ -174,17 +204,24 @@ export class TunnelInstance {
     this.isVerified = true;
     this.status = 'VERIFIED';
 
-    // 2. RDP Protocol handshake through the tunnel
-    try {
-      const result = await rdpHealthChecker.checkRdp(this.publicHost, this.publicPort, 3500);
-      this.rdpVerification = result;
-      if (result.connected) {
-        this.isVerified = true;
-        this.status = 'VERIFIED';
-        return true;
+    // 2. Check if local port is an active RDP listener before probing public endpoint
+    const localCheck = await rdpHealthChecker.checkRdp('127.0.0.1', this.localPort, 1200);
+    if (localCheck.connected && localCheck.rdpNegotiated) {
+      // Local service is verified RDP, now verify remote tunnel
+      try {
+        const result = await rdpHealthChecker.checkRdp(this.publicHost, this.publicPort, 3500);
+        this.rdpVerification = result;
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
+    } else {
+      // Guest OS may still be booting up or in setup/BIOS; mark socket as verified
+      this.rdpVerification = {
+        connected: socketOk,
+        latencyMs: 0,
+        rdpNegotiated: false,
+        statusMessage: 'Cổng relay công khai đã sẵn sàng; đang đợi hệ điều hành máy ảo nạp dịch vụ Desktop.',
+      };
     }
 
     return true;
@@ -286,6 +323,18 @@ export class TunnelManager {
       return this.vmTunnels.get(vmId)!.getStatus();
     }
     return this.defaultTunnel.getStatus();
+  }
+
+  public async reloadTunnel(vmId?: string, localPort?: number): Promise<TunnelStatus> {
+    if (vmId && this.vmTunnels.has(vmId)) {
+      const existing = this.vmTunnels.get(vmId)!;
+      return await existing.reload();
+    } else if (vmId && localPort) {
+      const newInst = new TunnelInstance(localPort, null);
+      this.vmTunnels.set(vmId, newInst);
+      return await newInst.reload();
+    }
+    return await this.defaultTunnel.reload();
   }
 
   public async verifyExternalEndpoint(vmId?: string): Promise<boolean> {

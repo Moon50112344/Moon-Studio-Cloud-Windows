@@ -30,6 +30,12 @@ async function startServer() {
     serverLogger.error('Server', `Initialization error: ${err}`);
   });
 
+  // Ensure IPv6-to-IPv4 bridge is ready for XRDP Windows 7 connections
+  const { vncBridgeManager } = await import('./src/server/vncBridge');
+  vncBridgeManager.ensureBridge(5991).catch((err) => {
+    serverLogger.warn('Server', `VNC bridge initialization notice: ${err}`);
+  });
+
   // Start real-time RDP session & event monitor
   const { rdpSessionMonitor } = await import('./src/server/rdpSessionMonitor');
   rdpSessionMonitor.start();

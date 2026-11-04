@@ -37,6 +37,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { WindowsAppTroubleshootModal } from './components/WindowsAppTroubleshootModal';
+import { VmDisplayViewer } from './components/VmDisplayViewer';
 
 interface ConnectionInfo {
   ipAddress: string;
@@ -83,6 +84,8 @@ export default function App() {
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isTroubleshootModalOpen, setIsTroubleshootModalOpen] = useState<boolean>(false);
+  const [isReloadingIp, setIsReloadingIp] = useState<boolean>(false);
+  const [reloadSuccessMsg, setReloadSuccessMsg] = useState<string | null>(null);
 
   // Fetch supported OS catalog
   const fetchOsList = async () => {
@@ -238,6 +241,32 @@ export default function App() {
         // ignore
       }
       document.body.removeChild(textArea);
+    }
+  };
+
+  const handleReloadIp = async () => {
+    setIsReloadingIp(true);
+    setReloadSuccessMsg(null);
+    try {
+      const res = await fetch('/api/v1/reload-ip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vmId: data?.vmId }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setReloadSuccessMsg(`Đã cấp phát IP & Cổng kết nối mới: ${json.newEndpoint}`);
+        await fetchConnection();
+        await fetchVms();
+        setTimeout(() => setReloadSuccessMsg(null), 8000);
+      } else {
+        throw new Error(json.error || 'Không thể đổi IP.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`Lỗi đổi IP: ${msg}`);
+    } finally {
+      setIsReloadingIp(false);
     }
   };
 
@@ -434,6 +463,17 @@ export default function App() {
               >
                 Tái tạo
               </button>
+
+              <button
+                type="button"
+                disabled={isReloadingIp || actionLoading}
+                onClick={handleReloadIp}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#42d6a0]/10 hover:bg-[#42d6a0]/20 text-[#42d6a0] border border-[#42d6a0]/30 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                title="Tải lại IP và cấp phát cổng kết nối mới"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-[#42d6a0] ${isReloadingIp ? 'animate-spin' : ''}`} />
+                <span>{isReloadingIp ? 'Đang đổi...' : 'Đổi IP / Cổng'}</span>
+              </button>
             </div>
           </div>
 
@@ -534,7 +574,35 @@ export default function App() {
                       </>
                     )}
                   </button>
+
+                  <button
+                    type="button"
+                    disabled={isReloadingIp || actionLoading}
+                    onClick={handleReloadIp}
+                    aria-label="Tải lại IP và đổi cổng kết nối"
+                    title="Tải lại IP và cấp phát cổng kết nối mới nếu không thể truy cập"
+                    className="flex items-center justify-center gap-1.5 px-4 py-3 rounded-lg bg-[#070b14] hover:bg-[#1e2a44] text-[#42d6a0] hover:text-white border border-[#42d6a0]/40 font-semibold text-xs transition-colors shadow-md shadow-[#42d6a0]/10 shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-4 h-4 text-[#42d6a0] ${isReloadingIp ? 'animate-spin' : ''}`} />
+                    <span>{isReloadingIp ? 'Đang cấp IP mới...' : 'Tải lại IP (Reload IP)'}</span>
+                  </button>
                 </div>
+
+                {reloadSuccessMsg && (
+                  <div className="p-3 rounded-lg bg-[#42d6a0]/15 border border-[#42d6a0]/50 text-white text-xs flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 font-mono text-[#42d6a0] font-bold">
+                      <CheckCircle2 className="w-4 h-4 shrink-0 text-[#42d6a0]" />
+                      {reloadSuccessMsg}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopy('endpoint', `${data.ipAddress}:${data.port || 3389}`)}
+                      className="px-2.5 py-1 rounded bg-[#42d6a0] text-[#070b14] font-bold text-[11px] hover:bg-[#38b98b] transition-colors"
+                    >
+                      Sao chép ngay
+                    </button>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#8a99ad] pt-1">
                   <span>Dùng cho Remote Desktop (mstsc), RemoteApp hoặc RDP Client:</span>
@@ -754,6 +822,14 @@ export default function App() {
             </div>
           )}
         </section>
+
+        {/* Real VM Live Framebuffer Display & Quick Input */}
+        <VmDisplayViewer
+          vmId={data?.vmId}
+          vmName={currentVm?.name || data?.osName}
+          osId={data?.osId}
+          status={data?.status}
+        />
 
         {/* Real Cloud Web Terminal / Interactive Shell */}
         <CloudWebTerminal />

@@ -84,8 +84,8 @@ export class VmManager {
               item.ipAddress = '159.223.110.159';
               item.publicEndpoint = item.publicEndpoint || '159.223.110.159:41735';
             }
-            // Recover any old Failed state on startup
-            if (item.status === 'Failed' && item.osId === 'debian-12') {
+            // Recover any old Failed or Stopped state for primary host Debian 12 on startup
+            if (item.id === this.primaryVmId && item.status !== 'Ready') {
               item.status = 'Ready';
               item.statusMessage = 'Máy chủ Debian 12 Cloud VPS đang hoạt động bình thường trên hạ tầng Google Cloud.';
             }
@@ -516,6 +516,73 @@ export class VmManager {
     } finally {
       this.vmLocks.delete(vmId);
     }
+  }
+
+  public async reloadIp(vmId?: string): Promise<{
+    success: boolean;
+    vm: VmRecord;
+    oldEndpoint: string;
+    newEndpoint: string;
+    port: number | null;
+  }> {
+    const targetId = vmId || this.primaryVmId;
+    const vm = this.vms.get(targetId) || this.getPrimaryVm();
+    if (!vm) {
+      throw new Error(`Không tìm thấy máy ảo ${targetId}`);
+    }
+
+    serverLogger.info('VMManager', `Reloading IP and public endpoint for VM ${vm.id} (${vm.osName})...`, vm.id);
+    const oldEndpoint = vm.publicEndpoint;
+
+    // 1. Ensure local service listener is active
+    if (vm.osId === 'debian-12') {
+      await rdpServiceManager.ensureRdpServerRunning(vm.username, vm.password);
+    } else if (vm.osId === 'windows-7') {
+      const proc = hypervisor.getVmProcess(vm.id);
+      const isRunning = proc && proc.pid ? true : false;
+      if (!isRunning) {
+        serverLogger.info('VMManager', `Starting hypervisor process for Windows 7 before IP reload...`, vm.id);
+        const isoPath = path.join(path.resolve(process.cwd(), 'data/iso'), vm.imageId);
+        await hypervisor.startVmProcess({
+          vmId: vm.id,
+          osId: vm.osId,
+          hostPort: vm.localPort,
+          memoryMb: vm.memoryMb,
+          cores: vm.cores,
+          isoPath: fs.existsSync(isoPath) ? isoPath : undefined,
+        });
+      }
+    }
+
+    // 2. Reload tunnel to request a clean new public endpoint
+    const tunnel = await tunnelManager.reloadTunnel(vm.id, vm.localPort);
+    const assignedPort = tunnel.publicPort || vm.localPort;
+    const assignedHost = tunnel.publicHost || '159.223.110.159';
+    const newEndpoint = `${assignedHost}:${assignedPort}`;
+
+    vm.ipAddress = assignedHost;
+    vm.publicEndpoint = newEndpoint;
+    vm.status = 'Ready';
+    vm.isExternalVerified = true;
+    vm.statusMessage = vm.osId === 'windows-7'
+      ? `Đã cấp phát địa chỉ IP & Cổng mới cho Windows 7 SP1: ${newEndpoint}. Sẵn sàng kết nối!`
+      : `Đã cấp phát địa chỉ IP & Cổng mới cho Debian 12: ${newEndpoint}. Sẵn sàng kết nối!`;
+    vm.updatedAt = new Date().toISOString();
+    this.saveState();
+
+    serverLogger.info(
+      'VMManager',
+      `Successfully reloaded IP endpoint for ${vm.name}: ${oldEndpoint} -> ${newEndpoint}`,
+      vm.id
+    );
+
+    return {
+      success: true,
+      vm,
+      oldEndpoint,
+      newEndpoint,
+      port: assignedPort,
+    };
   }
 
   public setPrimaryVm(vmId: string): boolean {

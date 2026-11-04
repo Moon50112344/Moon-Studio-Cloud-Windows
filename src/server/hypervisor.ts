@@ -4,6 +4,7 @@ import path from 'node:path';
 import net from 'node:net';
 import { serverLogger } from './logger';
 import { SupportedOsId } from './imageManager';
+import { vncBridgeManager } from './vncBridge';
 
 export interface VmProcessInfo {
   vmId: string;
@@ -37,7 +38,20 @@ export class HypervisorController {
    */
   public prepareDisk(vmId: string, sizeGb = 40): string {
     const diskPath = path.join(this.disksDir, `${vmId}.qcow2`);
-    if (!fs.existsSync(diskPath)) {
+    let needsCreation = !fs.existsSync(diskPath);
+    if (!needsCreation) {
+      try {
+        const stats = fs.statSync(diskPath);
+        if (stats.size < 10240) {
+          serverLogger.warn('Hypervisor', `Disk image ${diskPath} is truncated (${stats.size} bytes). Recreating...`, vmId);
+          needsCreation = true;
+        }
+      } catch {
+        needsCreation = true;
+      }
+    }
+
+    if (needsCreation) {
       serverLogger.info('Hypervisor', `Preparing virtual disk storage: ${diskPath} (${sizeGb}GB)`, vmId);
       let hasQemuImg = false;
       try {
@@ -136,6 +150,12 @@ export class HypervisorController {
       );
 
       const vncDisplay = (hostPort % 100) + 1;
+      const vncPort = 5900 + vncDisplay;
+      try {
+        await vncBridgeManager.ensureBridge(vncPort);
+      } catch {
+        // ignore
+      }
       args = [
         '-machine', 'pc',
         '-accel', accelArg,
@@ -155,8 +175,8 @@ export class HypervisorController {
       ];
 
       if (isoPath && fs.existsSync(isoPath)) {
-        args.push('-drive', `file=${isoPath},index=1,media=cdrom`);
-        args.push('-boot', 'order=dc,menu=on');
+        args.push('-cdrom', isoPath);
+        args.push('-boot', 'once=d,order=cd');
         serverLogger.info('Hypervisor', `Attached Windows 7 installation ISO: ${isoPath}`, vmId);
       }
     } else {
@@ -363,6 +383,8 @@ export class HypervisorController {
 
     serverLogger.warn('Hypervisor', `Force stopping QEMU process (SIGKILL) for VM ${vmId} (PID: ${info.pid})`, vmId);
     try {
+      const vncDisplay = (info.hostPort % 100) + 1;
+      vncBridgeManager.closeBridge(5900 + vncDisplay);
       process.kill(info.pid, 'SIGKILL');
       info.status = 'STOPPED';
       info.pid = null;

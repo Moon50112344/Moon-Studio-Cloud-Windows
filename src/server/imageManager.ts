@@ -158,10 +158,19 @@ export class ImageManager {
     }
 
     const filePath = path.join(this.isoDir, def.isoFileName);
-    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1024) {
+    const isWin7Dummy = osId === 'windows-7' && fs.existsSync(filePath) && fs.statSync(filePath).size === 4194304;
+    if (fs.existsSync(filePath) && fs.statSync(filePath).size > 1024 && !isWin7Dummy) {
       serverLogger.info('ImageManager', `Valid ISO image verified: ${filePath} (${def.name})`);
       onProgress?.(100, 'Image verified');
       return filePath;
+    }
+
+    if (isWin7Dummy) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // ignore
+      }
     }
 
     serverLogger.info('ImageManager', `Initializing bootable OS image for ${def.name}: ${filePath}...`);
@@ -270,7 +279,8 @@ ready_prompt:
     db " Windows 7 Virtual Machine is running and ready.", 10
     db " ACPI Power Management Active. (Listening for Shutdown / Restart / Keystrokes)", 10, 10
     db " C:\\Windows\\system32> ", 0
-times 2048 - ($ - $$) db 0
+times 2046 - ($ - $$) db 0
+dw 0xAA55
 `;
               fs.writeFileSync(`${tempDir}/boot.asm`, asmCode);
               execSync(`nasm -f bin "${tempDir}/boot.asm" -o "${tempDir}/boot/boot.bin"`, { stdio: 'pipe' });

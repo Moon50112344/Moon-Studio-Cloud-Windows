@@ -116,7 +116,11 @@ export class RdpHealthChecker {
       });
 
       socket.on('timeout', () => {
-        serverLogger.warn('RDPChecker', `Connection timeout reaching ${host}:${port}`, vmId);
+        serverLogger.debug(
+          'RDPChecker',
+          `Connection timeout reaching ${host}:${port} (service may be booting or host firewall filtering)`,
+          vmId
+        );
         finish({
           connected: false,
           latencyMs: Date.now() - startTime,

@@ -195,7 +195,7 @@ apiRouter.get('/rdp-download', (_req: Request, res: Response) => {
   }
 
   const rdpContent = [
-    `full address:s:${info.ipAddress}:3389`,
+    `full address:s:${info.ipAddress}:${info.port || 3389}`,
     `username:s:${info.username}`,
     `prompt for credentials:i:1`,
     `administrative session:i:1`,
@@ -304,6 +304,50 @@ apiRouter.post('/vms/:id/delete', async (req: Request, res: Response) => {
 apiRouter.post('/vms/:id/rebuild', async (req: Request, res: Response) => {
   const vm = await vmManager.rebuildVm(req.params.id);
   return res.json({ success: !!vm, vm });
+});
+
+/**
+ * Reload IP / Endpoint Rotation Endpoint (Section VI & User Request)
+ * Rotates public IP/port via tunnel reload and updates VM state
+ */
+apiRouter.post('/reload-ip', async (req: Request, res: Response) => {
+  const vmId = (req.body?.vmId as string) || undefined;
+  try {
+    const result = await vmManager.reloadIp(vmId);
+    return res.json({
+      success: true,
+      vm: result.vm,
+      oldEndpoint: result.oldEndpoint,
+      newEndpoint: result.newEndpoint,
+      connectionAddress: result.newEndpoint,
+      ipAddress: result.vm.ipAddress,
+      port: result.port,
+      message: `Đã cấp phát địa chỉ IP & Cổng mới thành công: ${result.newEndpoint}`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    serverLogger.error('API', `Reload IP failed: ${msg}`);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+apiRouter.post('/vms/:id/reload-ip', async (req: Request, res: Response) => {
+  try {
+    const result = await vmManager.reloadIp(req.params.id);
+    return res.json({
+      success: true,
+      vm: result.vm,
+      oldEndpoint: result.oldEndpoint,
+      newEndpoint: result.newEndpoint,
+      connectionAddress: result.newEndpoint,
+      ipAddress: result.vm.ipAddress,
+      port: result.port,
+      message: `Đã cấp phát địa chỉ IP & Cổng mới cho ${result.vm.name}: ${result.newEndpoint}`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
 });
 
 /**

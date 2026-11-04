@@ -23,7 +23,7 @@ export class RdpServiceManager {
       serverLogger.info('RDPService', 'xrdp or desktop packages missing. Auto-installing in background...');
       try {
         execSync(
-          'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends xrdp xorgxrdp xfce4-session xfwm4 xfce4-panel xfdesktop4 thunar firefox-esr dbus dbus-x11 ssl-cert xfce4-terminal desktop-base genisoimage nasm',
+          'DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" --no-install-recommends xrdp xorgxrdp xfce4-session xfwm4 xfce4-panel xfdesktop4 thunar chromium falkon dbus dbus-x11 ssl-cert xfce4-terminal desktop-base genisoimage nasm',
           { stdio: 'pipe' }
         );
         serverLogger.info('RDPService', 'xrdp, D-Bus and XFCE4 packages installed successfully.');
@@ -106,11 +106,32 @@ export class RdpServiceManager {
         '',
       ].join('\n');
       fs.writeFileSync(`${userHome}/.xsession`, xsessionContent, { encoding: 'utf8', mode: 0o755 });
-      try {
+        const desktopDir = `${userHome}/Desktop`;
+        if (!fs.existsSync(desktopDir)) {
+          fs.mkdirSync(desktopDir, { recursive: true });
+        }
+        // Create browser desktop shortcut
+        const browserDesktop = [
+          '[Desktop Entry]',
+          'Version=1.0',
+          'Type=Application',
+          'Name=Google Chrome (Chromium)',
+          'Comment=Web Browser',
+          'Exec=/usr/bin/chromium --no-sandbox --disable-dev-shm-usage',
+          'Icon=chromium',
+          'Terminal=false',
+          'StartupNotify=true',
+          '',
+        ].join('\n');
+        fs.writeFileSync(`${desktopDir}/Browser.desktop`, browserDesktop, { encoding: 'utf8', mode: 0o755 });
+        fs.writeFileSync(`${desktopDir}/Firefox.desktop`, browserDesktop.replace('Google Chrome (Chromium)', 'Internet (Web Browser)'), { encoding: 'utf8', mode: 0o755 });
+
+        // Ensure browser wrappers in /usr/local/bin
+        const chromeWrapper = '#!/bin/sh\nexec /usr/bin/chromium --no-sandbox --disable-dev-shm-usage "$@"\n';
+        fs.writeFileSync('/usr/local/bin/firefox', chromeWrapper, { encoding: 'utf8', mode: 0o755 });
+        fs.writeFileSync('/usr/local/bin/firefox-esr', chromeWrapper, { encoding: 'utf8', mode: 0o755 });
+
         execSync(`chown -R "${username}:${username}" "${userHome}"`, { stdio: 'ignore' });
-      } catch {
-        // ignore
-      }
 
       const startwmContent = [
         '#!/bin/sh',

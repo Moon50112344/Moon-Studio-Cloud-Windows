@@ -7,6 +7,13 @@ import { probeHostInfrastructure } from './infrastructure';
 import { rdpSessionMonitor } from './rdpSessionMonitor';
 import { imageManager, SupportedOsId } from './imageManager';
 import { vmMetricsCollector } from './metrics';
+import multer from 'multer';
+import { fileTransferService } from './fileTransfer';
+
+const upload = multer({
+  dest: '/tmp/uploads/',
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB limit
+});
 
 export const apiRouter = Router();
 
@@ -383,3 +390,87 @@ apiRouter.post('/vms/:id/input', async (req: Request, res: Response) => {
   const ok = await hypervisor.sendInputKey(id, String(key));
   return res.json({ success: ok });
 });
+
+/**
+ * File Upload Endpoint:
+ * Mode 1: 'folder' -> Saves directly to user's directory (Desktop, Downloads, etc.)
+ * Mode 2: 'install' -> Automatically executes/installs .exe (via Wine), .deb, or script
+ */
+apiRouter.post('/files/upload', upload.single('file'), async (req: Request, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, error: 'Vui lòng chọn một tệp để tải lên.' });
+    }
+
+    const mode = (req.body.mode === 'install' ? 'install' : 'folder') as 'folder' | 'install';
+    const targetDir = req.body.targetDir as string | undefined;
+
+    const result = await fileTransferService.handleUploadedFile({
+      tempFilePath: req.file.path,
+      originalFileName: req.file.originalname,
+      targetDir,
+      mode,
+    });
+
+    return res.json({
+      success: true,
+      file: result,
+      message: mode === 'install'
+        ? `Đã tải lên và kích hoạt tự động cài đặt / chạy tệp ${result.fileName}!`
+        : `Đã lưu tệp ${result.fileName} vào thư mục ${result.targetDir}!`,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    serverLogger.error('FileTransfer', `Upload failed: ${msg}`);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * Directory Files Listing Endpoint
+ */
+apiRouter.get('/files/list', (req: Request, res: Response) => {
+  try {
+    const dir = req.query.dir as string | undefined;
+    const result = fileTransferService.listFiles(dir);
+    return res.json({ success: true, ...result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * File Execution Endpoint (.exe with Wine, .deb with apt, .sh with bash)
+ */
+apiRouter.post('/files/execute', async (req: Request, res: Response) => {
+  try {
+    const { filePath } = req.body;
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin (filePath).' });
+    }
+    const result = await fileTransferService.executeFile(String(filePath));
+    return res.json({ ...result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * File Deletion Endpoint
+ */
+apiRouter.delete('/files', (req: Request, res: Response) => {
+  try {
+    const filePath = req.query.path as string;
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'Thiếu đường dẫn tệp tin (path).' });
+    }
+    const ok = fileTransferService.deleteFile(filePath);
+    return res.json({ success: ok, message: 'Đã xóa tệp tin thành công.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+

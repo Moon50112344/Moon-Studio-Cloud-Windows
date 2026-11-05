@@ -38,6 +38,7 @@ import {
 } from 'lucide-react';
 import { WindowsAppTroubleshootModal } from './components/WindowsAppTroubleshootModal';
 import { VmDisplayViewer } from './components/VmDisplayViewer';
+import { FileUploadManager } from './components/FileUploadManager';
 
 interface ConnectionInfo {
   ipAddress: string;
@@ -830,6 +831,9 @@ export default function App() {
           osId={data?.osId}
           status={data?.status}
         />
+
+        {/* File Upload & Execution Manager (2 Modes: Upload to Folder & Auto-Install .exe) */}
+        <FileUploadManager />
 
         {/* Real Cloud Web Terminal / Interactive Shell */}
         <CloudWebTerminal />

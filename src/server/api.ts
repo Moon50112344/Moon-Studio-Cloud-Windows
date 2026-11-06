@@ -9,6 +9,7 @@ import { imageManager, SupportedOsId } from './imageManager';
 import { vmMetricsCollector } from './metrics';
 import multer from 'multer';
 import { fileTransferService } from './fileTransfer';
+import { appStoreService } from './appStoreService';
 
 const upload = multer({
   dest: '/tmp/uploads/',
@@ -473,4 +474,60 @@ apiRouter.delete('/files', (req: Request, res: Response) => {
     return res.status(500).json({ success: false, error: msg });
   }
 });
+
+/**
+ * App & Game Store Catalog Endpoint
+ */
+apiRouter.get('/apps', (_req: Request, res: Response) => {
+  try {
+    const catalog = appStoreService.getCatalog();
+    return res.json({ success: true, catalog });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * App Installation Endpoint (explicit user trigger required)
+ */
+apiRouter.post('/apps/:appId/install', async (req: Request, res: Response) => {
+  try {
+    const { appId } = req.params;
+    const result = await appStoreService.installApp(appId);
+    return res.json({ ...result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * App Launch Endpoint
+ */
+apiRouter.post('/apps/:appId/launch', (req: Request, res: Response) => {
+  try {
+    const { appId } = req.params;
+    const result = appStoreService.launchApp(appId);
+    return res.json({ ...result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
+/**
+ * App Uninstall Endpoint
+ */
+apiRouter.post('/apps/:appId/uninstall', (req: Request, res: Response) => {
+  try {
+    const { appId } = req.params;
+    const result = appStoreService.uninstallApp(appId);
+    return res.json({ ...result });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return res.status(500).json({ success: false, error: msg });
+  }
+});
+
 

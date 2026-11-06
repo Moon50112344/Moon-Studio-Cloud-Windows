@@ -19,7 +19,9 @@ import {
   ChevronRight,
   ShieldCheck,
   Zap,
+  Gamepad2,
 } from 'lucide-react';
+import { AppGameStore } from './AppGameStore';
 
 interface FileItem {
   name: string;
@@ -47,7 +49,7 @@ interface UploadResult {
 }
 
 export function FileUploadManager() {
-  const [activeTab, setActiveTab] = useState<'folder' | 'install' | 'explorer'>('folder');
+  const [activeTab, setActiveTab] = useState<'folder' | 'install' | 'explorer' | 'appstore'>('folder');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [presetDir, setPresetDir] = useState<string>('/home/Administrator/Desktop');
   const [customDir, setCustomDir] = useState<string>('');
@@ -265,6 +267,25 @@ export function FileUploadManager() {
           >
             <Folder className="w-4 h-4" />
             <span>Danh sách tệp</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab('appstore');
+              setUploadResult(null);
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-all cursor-pointer ${
+              activeTab === 'appstore'
+                ? 'bg-gradient-to-r from-red-600 via-rose-600 to-pink-600 text-white shadow-md shadow-red-500/30'
+                : 'text-[#8a99ad] hover:text-white'
+            }`}
+          >
+            <Gamepad2 className="w-4 h-4 text-rose-300" />
+            <span>Cài ứng dụng trò chơi</span>
+            <span className="hidden sm:inline-block px-1.5 py-0.2 rounded-full text-[9px] font-bold bg-red-500/30 text-rose-200 border border-red-400/40">
+              ROBLOX
+            </span>
           </button>
         </div>
       </div>
@@ -639,6 +660,9 @@ export function FileUploadManager() {
           </div>
         </div>
       )}
+
+      {/* Tab 4: App & Game Store (Roblox featured, installs only on button click!) */}
+      {activeTab === 'appstore' && <AppGameStore />}
     </section>
   );
 }
